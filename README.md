@@ -14,7 +14,7 @@ Background task processing in rust using `apalis` and `mysql`
 ## Storage Types
 
 - [`MySqlStorage`]: Standard polling-based storage.
-- [`SharedMySqlStorage`]: Shared storage for multiple job types, reuses the connection.
+- [`MySqlStorageFactory`]: Shared storage for multiple job types, reuses the connection pool and the polling loop.
 
 The naming is designed to clearly indicate the storage mechanism and its capabilities, but under the hood the result is the `MySqlStorage` struct with different configurations.
 
@@ -46,7 +46,7 @@ async fn main() {
     let mut start = 0;
     let mut items = stream::repeat_with(move || {
         start += 1;
-        let task = Task::builder(start)
+        let task = TaskBuilder::new(start)
             .run_after(Duration::from_secs(1))
             .priority(1)
             .build();
@@ -72,11 +72,11 @@ async fn main() {
 use apalis_mysql::*;
 use apalis::prelude::*;
 use std::time::Duration;
-use apalis_workflow::*;
+use apalis_workflow::{SteppedFlow, sink::WorkflowSink};
 
 #[tokio::main]
 async fn main() {
-    let workflow = Workflow::new("odd-numbers-workflow")
+    let workflow = SteppedFlow::new("odd-numbers-workflow")
         .and_then(|a: usize| async move {
             Ok::<_, BoxDynError>((0..=a).collect::<Vec<_>>())
         })
@@ -97,7 +97,8 @@ async fn main() {
 
     let pool = MySqlPool::connect(env!("DATABASE_URL")).await.unwrap();
     MySqlStorage::setup(&pool).await.unwrap();
-    let mut backend = MySqlStorage::new_in_queue(&pool, "test-workflow");
+    let mut backend = MySqlStorage::new(&pool)
+        .with_config(Config::default().queue("test-workflow"));
 
     backend.push_start(100usize).await.unwrap();
 
@@ -128,14 +129,13 @@ use std::time::Duration;
 
 #[tokio::main]
 async fn main() {
-    let pool = MySqlPool::connect(env!("DATABASE_URL"))
-        .await
-        .unwrap();
-    let mut store = SharedMySqlStorage::new(pool);
+    let mut store = MySqlStorageFactory::new(env!("DATABASE_URL"));
 
-    let mut map_store = store.make_shared().unwrap();
+    MySqlStorage::setup(store.pool()).await.unwrap();
 
-    let mut int_store = store.make_shared().unwrap();
+    let mut map_store = store.create().unwrap();
+
+    let mut int_store = store.create().unwrap();
 
     map_store
         .push_stream(&mut stream::iter(vec![HashMap::<String, String>::new()]))
@@ -143,9 +143,9 @@ async fn main() {
         .unwrap();
     int_store.push(99).await.unwrap();
 
-    async fn send_reminder<T, I>(
+    async fn send_reminder<T>(
         _: T,
-        task_id: TaskId<I>,
+        task_id: TaskId,
         wrk: WorkerContext,
     ) -> Result<(), BoxDynError> {
         tokio::time::sleep(Duration::from_secs(2)).await;
