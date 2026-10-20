@@ -1,0 +1,62 @@
+{
+  "db_name": "MySQL",
+  "query": "WITH stats AS (\n    SELECT\n        job_type,\n        SUM(IF(status = 'Running', 1, 0)) AS running_jobs,\n        SUM(IF(status = 'Pending', 1, 0)) AS pending_jobs,\n        SUM(IF(status = 'Failed', 1, 0)) AS failed_jobs,\n        SUM(IF(status = 'Done', 1, 0)) AS done_jobs,\n        SUM(IF(status = 'Killed', 1, 0)) AS killed_jobs,\n        SUM(IF(status IN ('Pending', 'Queued', 'Running'), 1, 0)) AS active_jobs,\n        SUM(IF(status = 'Running' AND run_at < UNIX_TIMESTAMP(DATE_SUB(NOW(), INTERVAL 1 HOUR)), 1, NULL)) AS stale_running_jobs,\n        SUM(IF(run_at >= UNIX_TIMESTAMP(DATE_SUB(NOW(), INTERVAL 1 HOUR)), 1, NULL)) AS jobs_past_hour,\n        SUM(IF(DATE(FROM_UNIXTIME(run_at)) = DATE(NOW()), 1, NULL)) AS jobs_today,\n        SUM(IF(DATE(FROM_UNIXTIME(run_at)) = DATE(NOW()) AND status = 'Killed', 1, NULL)) AS killed_jobs_today,\n        SUM(IF(run_at >= UNIX_TIMESTAMP(DATE_SUB(NOW(), INTERVAL 7 DAY)), 1, NULL)) AS jobs_past_7_days,\n        ROUND(\n            AVG(\n                IF(\n                    status IN ('Done', 'Failed', 'Killed') AND done_at IS NOT NULL,\n                    (done_at - run_at) / 60.0,\n                    NULL\n                )\n            ),\n            2\n        ) AS avg_job_duration_mins,\n        MAX(IF(status = 'Running', (UNIX_TIMESTAMP(NOW()) - run_at) / 60.0, 0)) AS longest_running_job_mins,\n        COUNT(*) AS total_jobs,\n        MAX(run_at) AS most_recent_job\n    FROM\n        jobs\n    GROUP BY\n        job_type\n),\nlockers AS (\n    SELECT\n        job_type,\n        JSON_ARRAYAGG(lock_by) AS workers\n    FROM\n        jobs\n    WHERE\n        lock_by IS NOT NULL\n    GROUP BY\n        job_type\n),\nactivity AS (\n    SELECT\n        job_type,\n        JSON_ARRAYAGG(daily_count) AS activity\n    FROM (\n        SELECT\n            job_type,\n            DATE(FROM_UNIXTIME(run_at)) AS run_date,\n            COUNT(*) AS daily_count\n        FROM\n            jobs\n        WHERE\n            run_at >= UNIX_TIMESTAMP(DATE_SUB(NOW(), INTERVAL 7 DAY))\n        GROUP BY\n            job_type,\n            DATE(FROM_UNIXTIME(run_at))\n        ORDER BY\n            job_type,\n            DATE(FROM_UNIXTIME(run_at))\n    ) daily\n    GROUP BY\n        job_type\n),\nqueue_stats AS (\n    SELECT\n        job_type,\n        JSON_ARRAYAGG(\n            JSON_OBJECT(\n                'title',\n                statistic,\n                'stat_type',\n                type,\n                'value',\n                value,\n                'priority',\n                priority\n            )\n        ) as stats\n    FROM (\n        SELECT\n            s.job_type,\n            1 AS priority,\n            'Number' AS type,\n            'RUNNING_JOBS' AS statistic,\n            CAST(s.running_jobs AS CHAR) AS value\n        FROM\n            stats s\n        UNION ALL\n        SELECT\n            s.job_type,\n            1,\n            'Number',\n            'PENDING_JOBS',\n            CAST(s.pending_jobs AS CHAR)\n        FROM\n            stats s\n        UNION ALL\n        SELECT\n            s.job_type,\n            1,\n            'Number',\n            'FAILED_JOBS',\n            CAST(s.failed_jobs AS CHAR)\n        FROM\n            stats s\n        UNION ALL\n        SELECT\n            s.job_type,\n            2,\n            'Number',\n            'ACTIVE_JOBS',\n            CAST(s.active_jobs AS CHAR)\n        FROM\n            stats s\n        UNION ALL\n        SELECT\n            s.job_type,\n            2,\n            'Number',\n            'STALE_RUNNING_JOBS',\n            CAST(s.stale_running_jobs AS CHAR)\n        FROM\n            stats s\n        WHERE\n            s.stale_running_jobs IS NOT NULL\n        UNION ALL\n        SELECT\n            s.job_type,\n            2,\n            'Percentage',\n            'KILL_RATE',\n            CAST(ROUND(100.0 * s.killed_jobs / NULLIF(s.total_jobs, 0), 2) AS CHAR)\n        FROM\n            stats s\n        UNION ALL\n        SELECT\n            s.job_type,\n            3,\n            'Number',\n            'JOBS_PAST_HOUR',\n            CAST(s.jobs_past_hour AS CHAR)\n        FROM\n            stats s\n        WHERE\n            s.jobs_past_hour IS NOT NULL\n        UNION ALL\n        SELECT\n            s.job_type,\n            3,\n            'Number',\n            'JOBS_TODAY',\n            CAST(s.jobs_today AS CHAR)\n        FROM\n            stats s\n        WHERE\n            s.jobs_today IS NOT NULL\n        UNION ALL\n        SELECT\n            s.job_type,\n            3,\n            'Number',\n            'KILLED_JOBS_TODAY',\n            CAST(COALESCE(s.killed_jobs_today, 0) AS CHAR)\n        FROM\n            stats s\n        WHERE\n            s.jobs_today IS NOT NULL\n        UNION ALL\n        SELECT\n            s.job_type,\n            3,\n            'Decimal',\n            'AVG_JOBS_PER_MINUTE_PAST_HOUR',\n            CAST(ROUND(s.jobs_past_hour / 60.0, 2) AS CHAR)\n        FROM\n            stats s\n        WHERE\n            s.jobs_past_hour IS NOT NULL\n        UNION ALL\n        SELECT\n            s.job_type,\n            4,\n            'Number',\n            'TOTAL_JOBS',\n            CAST(s.total_jobs AS CHAR)\n        FROM\n            stats s\n        UNION ALL\n        SELECT\n            s.job_type,\n            4,\n            'Number',\n            'DONE_JOBS',\n            CAST(s.done_jobs AS CHAR)\n        FROM\n            stats s\n        UNION ALL\n        SELECT\n            s.job_type,\n            4,\n            'Number',\n            'KILLED_JOBS',\n            CAST(s.killed_jobs AS CHAR)\n        FROM\n            stats s\n        UNION ALL\n        SELECT\n            s.job_type,\n            4,\n            'Percentage',\n            'SUCCESS_RATE',\n            CAST(ROUND(100.0 * s.done_jobs / NULLIF(s.total_jobs, 0), 2) AS CHAR)\n        FROM\n            stats s\n        UNION ALL\n        SELECT\n            s.job_type,\n            5,\n            'Decimal',\n            'AVG_JOB_DURATION_MINS',\n            CAST(s.avg_job_duration_mins AS CHAR)\n        FROM\n            stats s\n        WHERE\n            s.avg_job_duration_mins IS NOT NULL\n        UNION ALL\n        SELECT\n            s.job_type,\n            5,\n            'Decimal',\n            'LONGEST_RUNNING_JOB_MINS',\n            CAST(ROUND(s.longest_running_job_mins, 2) AS CHAR)\n        FROM\n            stats s\n        UNION ALL\n        SELECT\n            s.job_type,\n            6,\n            'Number',\n            'JOBS_PAST_7_DAYS',\n            CAST(s.jobs_past_7_days AS CHAR)\n        FROM\n            stats s\n        WHERE\n            s.jobs_past_7_days IS NOT NULL\n        UNION ALL\n        SELECT\n            s.job_type,\n            8,\n            'Timestamp',\n            'MOST_RECENT_JOB',\n            CAST(s.most_recent_job AS CHAR)\n        FROM\n            stats s\n    ) t\n    GROUP BY\n        job_type\n),\nall_job_types AS (\n    SELECT\n        worker_type AS job_type\n    FROM\n        workers\n    UNION\n    SELECT\n        job_type\n    FROM\n        stats\n)\nSELECT\n    jt.job_type as name,\n    COALESCE(qs.stats, JSON_ARRAY()) as stats,\n    COALESCE(lk.workers, JSON_ARRAY()) as workers,\n    COALESCE(a.activity, JSON_ARRAY()) as activity\nFROM\n    all_job_types jt\n    LEFT JOIN queue_stats qs ON jt.job_type = qs.job_type\n    LEFT JOIN lockers lk ON jt.job_type = lk.job_type\n    LEFT JOIN activity a ON jt.job_type = a.job_type\nORDER BY\n    name;\n",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "name",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "collation": 255,
+          "max_size": 800
+        },
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "stats",
+        "type_info": {
+          "type": "Json",
+          "flags": "BINARY",
+          "collation": 255,
+          "max_size": 4294967292
+        },
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 2,
+        "name": "workers",
+        "type_info": {
+          "type": "Json",
+          "flags": "BINARY",
+          "collation": 255,
+          "max_size": 4294967292
+        },
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 3,
+        "name": "activity",
+        "type_info": {
+          "type": "Json",
+          "flags": "BINARY",
+          "collation": 255,
+          "max_size": 4294967292
+        },
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "e955ecc279a618f4c4063a566cc89ee392e53dbdd86aaf89bc189514519a8fef"
+}
