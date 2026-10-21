@@ -8,6 +8,9 @@
   - the backend error is now `apalis_mysql::Error` instead of `sqlx::Error`, and `Config` is provided by this crate.
   - the `chrono` and `time` features are gone: timestamps are plain `u64` seconds since the Unix epoch on the public API.
   - `apalis-sql` is no longer a dependency; `apalis-core 1.0.0`, `apalis-codec 1.0.0` and `sqlx 0.9` are used instead.
+- _feat_: `MySqlStorage::with_poll_interval` wraps the core `poll_with_interval` primitive so idle workers can pick up new tasks before the 30-second heartbeat.
+- _fix_: `reenqueue_abandoned` now returns `Error::ReenqueueMismatch` instead of logging a warning and committing a partial re-enqueue during graceful shutdown, matching the sqlite and postgres backends.
+- _fix_: stop double-encoding the task id list in `reenqueue_abandoned`, which made the shutdown re-enqueue match zero rows.
 - _fix_: MariaDB compatibility for `wait_for` and `check_status` by replacing `CAST(? AS JSON)` with `JSON_EXTRACT(?, '$')` (#27)
 
 ## [1.0.0-rc.8] - 2026-05-08

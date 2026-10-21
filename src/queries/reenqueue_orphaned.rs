@@ -47,8 +47,9 @@ pub async fn reenqueue_abandoned<E>(
 where
     for<'e> &'e mut E: Executor<'e, Database = sqlx::MySql>,
 {
+    // `coalesce_ids` already returns a JSON array; serializing it again would
+    // produce a JSON string and `JSON_TABLE` would match no rows.
     let task_ids = coalesce_ids(task_ids);
-    let task_ids = serde_json::to_string(&task_ids).map_err(Error::JsonError)?;
     let res = sqlx::query_file!(
         "queries/backend/reenqueue_abandoned.sql",
         queue,

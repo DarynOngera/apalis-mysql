@@ -4,13 +4,18 @@ use std::{
     fmt::Debug,
     marker::PhantomData,
     task::{Context, Poll},
+    time::Duration,
 };
 
 use apalis_codec::json::JsonCodec;
 use apalis_core::{
     backend::{
         Backend, BackendConfig, TryNewBackend, WireFormatBackend,
-        ext::{BackendExt, lifecycle::BeforeStart},
+        ext::{
+            BackendExt,
+            lifecycle::BeforeStart,
+            poll_strategy::{IntervalStrategy, PollWith},
+        },
         finalize::Durable,
         persistence::{Persisted, TaskPersistLayer},
     },
@@ -132,6 +137,31 @@ impl<Args> MySqlStorage<Args> {
     pub fn with_config(mut self, config: Config) -> MySqlStorage<Args> {
         self.persistence.config = config;
         self
+    }
+
+    /// Wake the worker every `interval` while the queue is empty.
+    ///
+    /// An idle worker re-polls on its [heartbeat](Config::heartbeat_interval),
+    /// which defaults to 30 seconds, so tasks pushed after the worker has
+    /// parked wait that long before they are picked up. MySQL has no
+    /// insert notification equivalent to SQLite's update hook or
+    /// PostgreSQL's `LISTEN/NOTIFY`, so low-latency pickup uses a timer.
+    ///
+    /// This is a thin wrapper over the core
+    /// `BackendExt::poll_with_interval`; use `poll_with_backoff` directly if
+    /// you need an adaptive interval.
+    ///
+    /// ```no_run
+    /// # use apalis_mysql::{MySqlPool, MySqlStorage};
+    /// # use std::time::Duration;
+    /// # async fn run(pool: &MySqlPool) {
+    /// let storage = MySqlStorage::<u32>::new(pool)
+    ///     .with_poll_interval(Duration::from_millis(100));
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn with_poll_interval(self, interval: Duration) -> PollWith<Self, IntervalStrategy> {
+        BackendExt::poll_with_interval(self, interval)
     }
 
     /// Get the underlying pool
@@ -518,6 +548,113 @@ mod tests {
             .find(|task| task.status() == apalis_core::task::status::Status::Done)
             .expect("the task completed");
         assert_eq!(done.args, br#"42"#.to_vec());
+    }
+
+    #[tokio::test]
+    async fn poll_interval_wakes_idle_worker() {
+        let pool = pool().await;
+        let queue = format!("poll-{}", ulid::Ulid::generate());
+
+        let backend = MySqlStorage::<u32>::new(&pool)
+            .with_config(Config::default().queue(queue.clone()))
+            .with_poll_interval(Duration::from_millis(50));
+
+        async fn stop(_: u32, wrk: WorkerContext) -> Result<(), BoxDynError> {
+            wrk.stop().unwrap();
+            Ok(())
+        }
+
+        let worker = WorkerBuilder::new(format!("poller-{}", ulid::Ulid::generate()))
+            .backend(backend)
+            .build(stop);
+        let handle = tokio::spawn(worker.run());
+
+        // Let the worker park with an empty queue, then push after it is idle.
+        // The heartbeat is 30s, so this only completes if the poll interval
+        // wakes the parked worker.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let mut producer =
+            MySqlStorage::<u32>::new(&pool).with_config(Config::default().queue(queue));
+        producer.push(7u32).await.unwrap();
+
+        tokio::time::timeout(Duration::from_secs(3), handle)
+            .await
+            .expect("the idle worker should wake on the poll interval")
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn reenqueue_abandoned_reports_mismatch() {
+        use apalis_core::backend::persistence::Persistence;
+
+        let pool = pool().await;
+        let queue = format!("reenqueue-{}", ulid::Ulid::generate());
+        let config = Config::default().queue(queue.clone());
+
+        let mut storage = MySqlStorage::<u32>::new(&pool).with_config(config.clone());
+        storage.push(1u32).await.unwrap();
+        storage.push(2u32).await.unwrap();
+
+        let worker = WorkerContext::new(&format!("worker-{}", ulid::Ulid::generate()));
+        let mut persistence = MySqlPersistence {
+            pool: pool.clone(),
+            config,
+        };
+        persistence.register(&worker).await.unwrap();
+
+        let fetched = persistence.fetch_next(&worker).await.unwrap();
+        assert_eq!(fetched.len(), 2);
+
+        let first = fetched[0].task_id().unwrap().to_string();
+        let second = fetched[1].task_id().unwrap().to_string();
+        sqlx::query("UPDATE jobs SET status = 'Running' WHERE id = ?")
+            .bind(&first)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let err = persistence
+            .reenqueue_abandoned(fetched.clone(), &worker)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            Error::ReenqueueMismatch {
+                queued: 2,
+                abandoned: 1,
+            }
+        ));
+
+        // The transaction rolled back, so the other task stays claimed.
+        let status: String = sqlx::query_scalar("SELECT status FROM jobs WHERE id = ?")
+            .bind(&second)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(status, "Queued");
+
+        sqlx::query("UPDATE jobs SET status = 'Queued' WHERE id = ?")
+            .bind(&first)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let count = persistence
+            .reenqueue_abandoned(fetched, &worker)
+            .await
+            .unwrap();
+        assert_eq!(count, 2);
+
+        let pending: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM jobs WHERE job_type = ? AND status = 'Pending'",
+        )
+        .bind(&queue)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(pending, 2);
     }
 
     #[tokio::test]

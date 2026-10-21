@@ -18,6 +18,30 @@ Background task processing in rust using `apalis` and `mysql`
 
 The naming is designed to clearly indicate the storage mechanism and its capabilities, but under the hood the result is the `MySqlStorage` struct with different configurations.
 
+### Polling and wakeups
+
+MySQL has no insert notification equivalent to SQLite's update hook or
+PostgreSQL's `LISTEN/NOTIFY`, so a worker discovers new tasks by polling. An
+idle `MySqlStorage` re-polls on its heartbeat (`Config::heartbeat_interval`,
+30 seconds by default). To pick up tasks sooner, wrap the storage in a timer
+using the core polling primitives:
+
+```rust,no_run
+use apalis_mysql::*;
+use std::time::Duration;
+
+# async fn example(pool: &MySqlPool) {
+let backend = MySqlStorage::<u32>::new(pool)
+    .with_poll_interval(Duration::from_millis(100));
+# }
+```
+
+`with_poll_interval` is a thin wrapper over
+`apalis_core::backend::ext::BackendExt::poll_with_interval`; call
+`poll_with_backoff` on the storage directly when you need an adaptive
+interval. `MySqlStorageFactory` polls on a timer already and exposes
+`with_poll_interval` to tune it.
+
 ## Setting up
 
 You need a working MySql server setup.

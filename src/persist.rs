@@ -144,14 +144,13 @@ impl Persistence for MySqlPersistence {
             reenqueue_abandoned(&mut *txn, config.queue.as_ref(), worker.name(), &task_ids).await?;
         if count as usize != tasks.len() {
             // A task that is still in flight cannot be re-enqueued here, and a
-            // task that was already acknowledged does not need to be. The
-            // orphaned task sweep picks up whatever is left behind, so this is
-            // not an error.
-            log::warn!(
-                "Re-enqueued {count} of {} abandoned tasks for worker {}",
-                tasks.len(),
-                worker.name()
-            );
+            // task that was already acknowledged does not need to be. Reporting
+            // the mismatch aborts the transaction instead of pretending the
+            // shutdown re-enqueue succeeded.
+            return Err(Error::ReenqueueMismatch {
+                queued: tasks.len(),
+                abandoned: count as usize,
+            });
         }
         txn.commit().await?;
         Ok(count)
