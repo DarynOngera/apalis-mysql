@@ -27,18 +27,18 @@ idle `MySqlStorage` re-polls on its heartbeat (`Config::heartbeat_interval`,
 using the core polling primitives:
 
 ```rust,no_run
+use apalis::prelude::*;
 use apalis_mysql::*;
 use std::time::Duration;
 
 # async fn example(pool: &MySqlPool) {
 let backend = MySqlStorage::<u32>::new(pool)
-    .with_poll_interval(Duration::from_millis(100));
+    .poll_with_interval(Duration::from_millis(100));
 # }
 ```
 
-`with_poll_interval` is a thin wrapper over
-`apalis_core::backend::ext::BackendExt::poll_with_interval`; call
-`poll_with_backoff` on the storage directly when you need an adaptive
+`poll_with_interval` comes from the core `BackendExt` trait, re-exported by
+`apalis::prelude`. Call `poll_with_backoff` when you need an adaptive
 interval. `MySqlStorageFactory` polls on a timer already and exposes
 `with_poll_interval` to tune it.
 

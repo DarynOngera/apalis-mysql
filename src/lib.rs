@@ -4,18 +4,13 @@ use std::{
     fmt::Debug,
     marker::PhantomData,
     task::{Context, Poll},
-    time::Duration,
 };
 
 use apalis_codec::json::JsonCodec;
 use apalis_core::{
     backend::{
         Backend, BackendConfig, TryNewBackend, WireFormatBackend,
-        ext::{
-            BackendExt,
-            lifecycle::BeforeStart,
-            poll_strategy::{IntervalStrategy, PollWith},
-        },
+        ext::{BackendExt, lifecycle::BeforeStart},
         finalize::Durable,
         persistence::{Persisted, TaskPersistLayer},
     },
@@ -137,31 +132,6 @@ impl<Args> MySqlStorage<Args> {
     pub fn with_config(mut self, config: Config) -> MySqlStorage<Args> {
         self.persistence.config = config;
         self
-    }
-
-    /// Wake the worker every `interval` while the queue is empty.
-    ///
-    /// An idle worker re-polls on its [heartbeat](Config::heartbeat_interval),
-    /// which defaults to 30 seconds, so tasks pushed after the worker has
-    /// parked wait that long before they are picked up. MySQL has no
-    /// insert notification equivalent to SQLite's update hook or
-    /// PostgreSQL's `LISTEN/NOTIFY`, so low-latency pickup uses a timer.
-    ///
-    /// This is a thin wrapper over the core
-    /// `BackendExt::poll_with_interval`; use `poll_with_backoff` directly if
-    /// you need an adaptive interval.
-    ///
-    /// ```no_run
-    /// # use apalis_mysql::{MySqlPool, MySqlStorage};
-    /// # use std::time::Duration;
-    /// # async fn run(pool: &MySqlPool) {
-    /// let storage = MySqlStorage::<u32>::new(pool)
-    ///     .with_poll_interval(Duration::from_millis(100));
-    /// # }
-    /// ```
-    #[must_use]
-    pub fn with_poll_interval(self, interval: Duration) -> PollWith<Self, IntervalStrategy> {
-        BackendExt::poll_with_interval(self, interval)
     }
 
     /// Get the underlying pool
@@ -548,41 +518,6 @@ mod tests {
             .find(|task| task.status() == apalis_core::task::status::Status::Done)
             .expect("the task completed");
         assert_eq!(done.args, br#"42"#.to_vec());
-    }
-
-    #[tokio::test]
-    async fn poll_interval_wakes_idle_worker() {
-        let pool = pool().await;
-        let queue = format!("poll-{}", ulid::Ulid::generate());
-
-        let backend = MySqlStorage::<u32>::new(&pool)
-            .with_config(Config::default().queue(queue.clone()))
-            .with_poll_interval(Duration::from_millis(50));
-
-        async fn stop(_: u32, wrk: WorkerContext) -> Result<(), BoxDynError> {
-            wrk.stop().unwrap();
-            Ok(())
-        }
-
-        let worker = WorkerBuilder::new(format!("poller-{}", ulid::Ulid::generate()))
-            .backend(backend)
-            .build(stop);
-        let handle = tokio::spawn(worker.run());
-
-        // Let the worker park with an empty queue, then push after it is idle.
-        // The heartbeat is 30s, so this only completes if the poll interval
-        // wakes the parked worker.
-        tokio::time::sleep(Duration::from_millis(500)).await;
-
-        let mut producer =
-            MySqlStorage::<u32>::new(&pool).with_config(Config::default().queue(queue));
-        producer.push(7u32).await.unwrap();
-
-        tokio::time::timeout(Duration::from_secs(3), handle)
-            .await
-            .expect("the idle worker should wake on the poll interval")
-            .unwrap()
-            .unwrap();
     }
 
     #[tokio::test]
