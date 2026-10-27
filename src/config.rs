@@ -160,3 +160,76 @@ impl Config {
         self.heartbeat_interval * self.missed_heartbeats as u32
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn defaults_match_the_documentation() {
+        let config = Config::default();
+        assert_eq!(config.batch_size, 10);
+        assert_eq!(config.heartbeat_interval, Duration::from_secs(30));
+        assert_eq!(config.missed_heartbeats, 10);
+        assert_eq!(config.queue, Queue::from("default"));
+        assert_eq!(config.database_url, None);
+        assert!(config.lock_tasks);
+        assert!(config.persist_results);
+    }
+
+    #[test]
+    fn builders_override_every_field() {
+        let config = Config::default()
+            .batch_size(25)
+            .heartbeat_interval(Duration::from_secs(5))
+            .missed_heartbeats(3)
+            .queue("emails")
+            .database_url("mysql://localhost/apalis")
+            .lock_tasks(false)
+            .persist_results(false);
+
+        assert_eq!(config.batch_size, 25);
+        assert_eq!(config.heartbeat_interval, Duration::from_secs(5));
+        assert_eq!(config.missed_heartbeats, 3);
+        assert_eq!(config.queue, Queue::from("emails"));
+        assert_eq!(
+            config.database_url.as_deref(),
+            Some("mysql://localhost/apalis")
+        );
+        assert!(!config.lock_tasks);
+        assert!(!config.persist_results);
+    }
+
+    #[test]
+    #[should_panic(expected = "batch size cannot be 0")]
+    fn zero_batch_size_is_rejected() {
+        let _ = Config::default().batch_size(0);
+    }
+
+    #[test]
+    fn orphaned_duration_is_heartbeat_times_missed_heartbeats() {
+        let config = Config::default()
+            .heartbeat_interval(Duration::from_secs(30))
+            .missed_heartbeats(2);
+        assert_eq!(config.orphaned_duration(), Duration::from_secs(60));
+        assert_eq!(
+            Config::default().orphaned_duration(),
+            Duration::from_secs(300)
+        );
+    }
+
+    #[test]
+    fn serde_round_trip_preserves_the_config() {
+        let config = Config::default().queue("emails").batch_size(4);
+        let json = serde_json::to_string(&config).unwrap();
+        let decoded: Config = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, config);
+    }
+
+    #[test]
+    fn missing_fields_fall_back_to_their_defaults() {
+        let decoded: Config =
+            serde_json::from_str(r#"{"queue":"emails","database_url":null}"#).unwrap();
+        assert_eq!(decoded, Config::default().queue("emails"));
+    }
+}

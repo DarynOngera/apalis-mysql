@@ -1,5 +1,6 @@
 #![doc = include_str!("../README.md")]
 //!
+//! [`MySqlStorageFactory`]: crate::shared::MySqlStorageFactory
 use std::{
     fmt::Debug,
     marker::PhantomData,
